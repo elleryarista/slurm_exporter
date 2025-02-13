@@ -31,44 +31,51 @@ type GPUsMetrics struct {
 	utilization float64
 }
 
-func GPUsGetMetrics() *GPUsMetrics {
+// Returns map of ["gpu_type"]GPUsMetrics
+func GPUsGetMetrics() map[string]*GPUsMetrics {
 	return ParseGPUsMetrics()
 }
 
-func ParseAllocatedGPUs() float64 {
-	var num_gpus = 0.0
+func ParseAllocatedGPUs() map[string]float64 {
+	gpu_map := make(map[string]float64)
 
 	args := []string{"-a", "-X", "--format=AllocTRES", "--state=RUNNING", "--noheader", "--parsable2"}
 	output := string(Execute("sacct", args))
 
 	if len(output) == 0 {
-		return 0.0
+		return make(map[string]float64)
 	}
 
 	for _, line := range strings.Split(output, "\n") {
 		if len(line) > 0 {
+			// billing=30,cpu=1,gres/gpu:a100=2,gres/gpu=2,mem=100G,node=1
 			line = strings.Trim(line, "\"")
 			for _, resource := range strings.Split(line, ",") {
-				if strings.HasPrefix(resource, "gres/gpu=") {
-					descriptor := strings.TrimPrefix(resource, "gres/gpu=")
-					job_gpus, _ := strconv.ParseFloat(descriptor, 64)
-					num_gpus += job_gpus
+				if strings.HasPrefix(resource, "gres/gpu:") { // Look for specific GPU type, eg "gres/gpu:k80=1"
+					descriptor := strings.TrimPrefix(resource, "gres/gpu:") // k80=1
+					values := strings.Split(descriptor, "=")
+					gpu_type := values[0]
+					count, _ := strconv.ParseFloat(values[1], 64)
+					
+					gpu_map[gpu_type] += count
 				}
 			}
 		}
 	}
 
-	return num_gpus
+	return gpu_map
 }
 
-func ParseTotalGPUs() float64 {
+func ParseTotalGPUs() map[string]float64 {
 	var num_gpus = 0.0
+
+	gpu_map := make(map[string]float64)
 
 	args := []string{"-h", "-o \"%n %G\""}
 	output := string(Execute("sinfo", args))
-	
+
 	if len(output) == 0 {
-		return 0.0
+		return make(map[string]float64)
 	}
 
 	for _, line := range strings.Split(output, "\n") {
@@ -79,27 +86,51 @@ func ParseTotalGPUs() float64 {
 			for _, resource := range strings.Split(gres, ",") {
 					if strings.HasPrefix(resource, "gpu:") {
 							// format: gpu:<type>:N(S:<something>), e.g. gpu:RTX2070:2(S:0)
-							descriptor := strings.Split(resource, ":")[2]
-							descriptor = strings.Split(descriptor, "(")[0]
+							descriptor := strings.Split(resource, ":")[2] // 2(S:0)
+							descriptor = strings.Split(descriptor, "(")[0] // 2
 							node_gpus, _ :=  strconv.ParseFloat(descriptor, 64)
 							num_gpus += node_gpus
+
+							type_gpu := strings.Split(resource, ":")[1] // RTX2070
+							gpu_map[type_gpu] += node_gpus
 					}
 			}
 		}
 	}
 
-	return num_gpus
+	return gpu_map
 }
 
-func ParseGPUsMetrics() *GPUsMetrics {
-	var gm GPUsMetrics
-	total_gpus := ParseTotalGPUs()
-	allocated_gpus := ParseAllocatedGPUs()
-	gm.alloc = allocated_gpus
-	gm.idle = total_gpus - allocated_gpus
-	gm.total = total_gpus
-	gm.utilization = allocated_gpus / total_gpus
-	return &gm
+
+// slurm_gpus_alloc{type="k80"} 4
+// slurm_gpus_alloc{type="a100"} 20
+// ...
+// slurm_gpus_idle{type="k80"} 20 (calculated value = total-alloc)
+// slurm_gpus_idle{type="a100"} 4
+// ...
+// slurm_gpus_total{type="k80"} 24
+// slurm_gpus_total{type="a100"} 24
+// ...
+// slurm_gpus_utilization{type="k80"} = 0.16666 (calculated value = alloc/total)
+// slurm_gpus_utilization{type="a100"} = 0.83333
+func ParseGPUsMetrics() map[string]*GPUsMetrics {
+	types := make(map[string]*GPUsMetrics)
+
+	totals := ParseTotalGPUs()
+	alloc := ParseAllocatedGPUs()
+
+	// TODO: Make sure keys in totals and alloc are the same
+
+	for gpu_type := range totals {
+		types[gpu_type] = &GPUsMetrics{0, 0, 0, 0}
+
+		types[gpu_type].alloc = alloc[gpu_type]
+		types[gpu_type].total = totals[gpu_type]
+		types[gpu_type].idle = totals[gpu_type] - alloc[gpu_type]
+		types[gpu_type].utilization = alloc[gpu_type] / totals[gpu_type]
+	}
+
+	return types
 }
 
 // Execute the sinfo command and return its output
@@ -126,11 +157,13 @@ func Execute(command string, arguments []string) []byte {
  */
 
 func NewGPUsCollector() *GPUsCollector {
+	labels := []string{"type"}
+
 	return &GPUsCollector{
-		alloc: prometheus.NewDesc("slurm_gpus_alloc", "Allocated GPUs", nil, nil),
-		idle:  prometheus.NewDesc("slurm_gpus_idle", "Idle GPUs", nil, nil),
-		total: prometheus.NewDesc("slurm_gpus_total", "Total GPUs", nil, nil),
-		utilization: prometheus.NewDesc("slurm_gpus_utilization", "Total GPU utilization", nil, nil),
+		alloc: prometheus.NewDesc("slurm_gpus_alloc", "Allocated GPUs by type", labels, nil),
+		idle:  prometheus.NewDesc("slurm_gpus_idle", "Idle GPUs by type", labels, nil),
+		total: prometheus.NewDesc("slurm_gpus_total", "Total GPUs by type", labels, nil),
+		utilization: prometheus.NewDesc("slurm_gpus_utilization", "Total GPU utilization by type", labels, nil),
 	}
 }
 
@@ -150,8 +183,10 @@ func (cc *GPUsCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 func (cc *GPUsCollector) Collect(ch chan<- prometheus.Metric) {
 	cm := GPUsGetMetrics()
-	ch <- prometheus.MustNewConstMetric(cc.alloc, prometheus.GaugeValue, cm.alloc)
-	ch <- prometheus.MustNewConstMetric(cc.idle, prometheus.GaugeValue, cm.idle)
-	ch <- prometheus.MustNewConstMetric(cc.total, prometheus.GaugeValue, cm.total)
-	ch <- prometheus.MustNewConstMetric(cc.utilization, prometheus.GaugeValue, cm.utilization)
+	for gpu_type := range cm {
+		ch <- prometheus.MustNewConstMetric(cc.alloc, prometheus.GaugeValue, float64(cm[gpu_type].alloc), gpu_type)
+		ch <- prometheus.MustNewConstMetric(cc.idle, prometheus.GaugeValue, float64(cm[gpu_type].idle), gpu_type)
+		ch <- prometheus.MustNewConstMetric(cc.total, prometheus.GaugeValue, float64(cm[gpu_type].total), gpu_type)
+		ch <- prometheus.MustNewConstMetric(cc.utilization, prometheus.GaugeValue, float64(cm[gpu_type].utilization), gpu_type)
+	}
 }
