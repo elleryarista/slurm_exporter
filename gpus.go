@@ -47,18 +47,20 @@ func ParseAllocatedGPUs() map[string]float64 {
 	}
 
 	for _, line := range strings.Split(output, "\n") {
-		if len(line) > 0 {
-			// billing=30,cpu=1,gres/gpu:a100=2,gres/gpu=2,mem=100G,node=1
-			line = strings.Trim(line, "\"")
-			for _, resource := range strings.Split(line, ",") {
-				if strings.HasPrefix(resource, "gres/gpu:") { // Look for specific GPU type, eg "gres/gpu:k80=1"
-					descriptor := strings.TrimPrefix(resource, "gres/gpu:") // k80=1
-					values := strings.Split(descriptor, "=")
-					gpu_type := values[0]
-					count, _ := strconv.ParseFloat(values[1], 64)
-					
-					gpu_map[gpu_type] += count
-				}
+		if len(line) == 0 {
+			continue
+		}
+		
+		// billing=30,cpu=1,gres/gpu:a100=2,gres/gpu=2,mem=100G,node=1
+		line = strings.Trim(line, "\"")
+		for _, resource := range strings.Split(line, ",") {
+			if strings.HasPrefix(resource, "gres/gpu:") { // Look for specific GPU type, eg "gres/gpu:k80=1"
+				descriptor := strings.TrimPrefix(resource, "gres/gpu:") // k80=1
+				values := strings.Split(descriptor, "=")
+				gpu_type := values[0]
+				count, _ := strconv.ParseFloat(values[1], 64)
+				
+				gpu_map[gpu_type] += count
 			}
 		}
 	}
@@ -67,8 +69,6 @@ func ParseAllocatedGPUs() map[string]float64 {
 }
 
 func ParseTotalGPUs() map[string]float64 {
-	var num_gpus = 0.0
-
 	gpu_map := make(map[string]float64)
 
 	args := []string{"-h", "-o \"%n %G\""}
@@ -79,21 +79,22 @@ func ParseTotalGPUs() map[string]float64 {
 	}
 
 	for _, line := range strings.Split(output, "\n") {
-		if len(line) > 0 {
-			line = strings.Trim(line, "\"")
-			gres := strings.Fields(line)[1]
-			// gres column format: comma-delimited list of resources
-			for _, resource := range strings.Split(gres, ",") {
-					if strings.HasPrefix(resource, "gpu:") {
-							// format: gpu:<type>:N(S:<something>), e.g. gpu:RTX2070:2(S:0)
-							descriptor := strings.Split(resource, ":")[2] // 2(S:0)
-							descriptor = strings.Split(descriptor, "(")[0] // 2
-							node_gpus, _ :=  strconv.ParseFloat(descriptor, 64)
-							num_gpus += node_gpus
+		if len(line) == 0 {
+			continue
+		}
 
-							type_gpu := strings.Split(resource, ":")[1] // RTX2070
-							gpu_map[type_gpu] += node_gpus
-					}
+		line = strings.Trim(line, "\"")
+		gres := strings.Fields(line)[1]
+		// gres column format: comma-delimited list of resources
+		for _, resource := range strings.Split(gres, ",") {
+			if strings.HasPrefix(resource, "gpu:") {
+				// format: gpu:<type>:N(S:<something>), e.g. gpu:RTX2070:2(S:0)
+				descriptor := strings.Split(resource, ":")[2] // 2(S:0)
+				descriptor = strings.Split(descriptor, "(")[0] // 2
+				node_gpus, _ :=  strconv.ParseFloat(descriptor, 64)
+
+				type_gpu := strings.Split(resource, ":")[1] // RTX2070
+				gpu_map[type_gpu] += node_gpus
 			}
 		}
 	}
