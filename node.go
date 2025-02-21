@@ -36,11 +36,10 @@ type NodeMetrics struct {
 	memTotal uint64
 
 	gpuAlloc uint64
-	gpuIdle  uint64
-	gpuTotal uint64
 
 	hasGPU bool
 	gpuType string
+	gpuIndex []int
 
 	nodeStatus string
 }
@@ -62,7 +61,7 @@ func ParseNodeMetrics(input []byte) map[string]*NodeMetrics {
 	for _, line := range linesUniq {
 		node := strings.Fields(line)
 		nodeName := node[0]
-		nodes[nodeName] = &NodeMetrics{0, 0, 0, 0, 0, 0, 0, 0, 0, false, "", ""}
+		nodes[nodeName] = &NodeMetrics{0, 0, 0, 0, 0, 0, 0, false, "", nil, ""}
 
 
 		// Status Info
@@ -100,12 +99,39 @@ func ParseNodeMetrics(input []byte) map[string]*NodeMetrics {
 		
 		if (gpuTotalStr != "(null)") { // Has GPU
 			nodes[nodeName].hasGPU = true
-			usedGPUs := strings.Split(strings.Split(gpuAllocStr, "(")[0], ":") // gpu:a100:6
+			gpu_str := strings.Split(gpuAllocStr, "(")
+			usedGPUs := strings.Split(gpu_str[0], ":") // gpu:a100:6
 			nodes[nodeName].gpuType = usedGPUs[1]
 
 			nodes[nodeName].gpuAlloc, _ = strconv.ParseUint(usedGPUs[2], 10, 64)
-			nodes[nodeName].gpuTotal, _ = strconv.ParseUint(strings.Split(gpuTotalStr, ":")[2], 10, 64)
-			nodes[nodeName].gpuIdle = nodes[nodeName].gpuTotal - nodes[nodeName].gpuAlloc
+			num_gpus, _ := strconv.ParseUint(strings.Split(gpuTotalStr, ":")[2], 10, 64)
+
+			// index_list = IDX:0,2-6
+						 // IDX:0,2-3,6
+						 // IDX:0-7
+						 // IDX:0
+						 // IDX:N/A
+			index_list := strings.TrimSuffix(gpu_str[1], ")")
+			index_list = strings.Split(index_list, ":")[1]
+
+			nodes[nodeName].gpuIndex = make([]int, num_gpus)
+			if (index_list != "N/A") {
+				for _, part := range strings.Split(index_list, ",") {
+					if strings.Contains(part, "-") {
+						// Range
+						bounds := strings.Split(part, "-")
+						start, _ := strconv.Atoi(bounds[0])
+						end, _ := strconv.Atoi(bounds[1])
+						for i := start; i <= end; i++ {
+							nodes[nodeName].gpuIndex[i] = 1
+						}
+					} else {
+						// Single Digit
+						num, _ := strconv.Atoi(part)
+						nodes[nodeName].gpuIndex[num] = 1
+					}
+				}
+			}
 		}
 	}
 
@@ -133,15 +159,13 @@ type NodeCollector struct {
 	memTotal *prometheus.Desc
 
 	gpuAlloc *prometheus.Desc
-	gpuIdle  *prometheus.Desc
-	gpuTotal *prometheus.Desc
 }
 
 // NewNodeCollector creates a Prometheus collector to keep all our stats in
 // It returns a set of collections for consumption
 func NewNodeCollector() *NodeCollector {
 	labels_cpu := []string{"node","status"}
-	labels_gpu := []string{"node","type"}
+	labels_gpu := []string{"node","type","index"}
 
 	return &NodeCollector{
 		cpuAlloc: prometheus.NewDesc("slurm_node_cpu_alloc", "Allocated CPUs per node", labels_cpu, nil),
@@ -153,8 +177,6 @@ func NewNodeCollector() *NodeCollector {
 		memTotal: prometheus.NewDesc("slurm_node_mem_total", "Total memory per node", labels_cpu, nil),
 
 		gpuAlloc: prometheus.NewDesc("slurm_node_gpu_alloc", "Allocated GPUs per node", labels_gpu, nil),
-		gpuIdle:  prometheus.NewDesc("slurm_node_gpu_idle", "Idle GPUs per node", labels_gpu, nil),
-		gpuTotal: prometheus.NewDesc("slurm_node_gpu_total", "Total GPUs per node", labels_gpu, nil),
 	}
 }
 
@@ -169,8 +191,6 @@ func (nc *NodeCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- nc.memTotal
 
 	ch <- nc.gpuAlloc
-	ch <- nc.gpuIdle
-	ch <- nc.gpuTotal
 }
 
 func (nc *NodeCollector) Collect(ch chan<- prometheus.Metric) {
@@ -185,9 +205,9 @@ func (nc *NodeCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(nc.memTotal, prometheus.GaugeValue, float64(nodes[node].memTotal), node, nodes[node].nodeStatus)
 
 		if (nodes[node].hasGPU) {
-			ch <- prometheus.MustNewConstMetric(nc.gpuAlloc, prometheus.GaugeValue, float64(nodes[node].gpuAlloc), node, nodes[node].gpuType)
-			ch <- prometheus.MustNewConstMetric(nc.gpuIdle,  prometheus.GaugeValue, float64(nodes[node].gpuIdle),  node, nodes[node].gpuType)
-			ch <- prometheus.MustNewConstMetric(nc.gpuTotal, prometheus.GaugeValue, float64(nodes[node].gpuTotal), node, nodes[node].gpuType)
+			for i := range nodes[node].gpuIndex {
+				ch <- prometheus.MustNewConstMetric(nc.gpuAlloc, prometheus.GaugeValue, float64(nodes[node].gpuIndex[i]), node, nodes[node].gpuType, strconv.Itoa(i))
+			}
 		}
 	}
 }
