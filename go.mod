@@ -1,4 +1,4 @@
-module github.com/vpenso/prometheus-slurm-exporter
+module slurm-exporter
 
 go 1.23.6
 
